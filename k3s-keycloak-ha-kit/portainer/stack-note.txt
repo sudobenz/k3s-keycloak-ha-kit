@@ -1,0 +1,1 @@
+Le déploiement Keycloak utilise les CRD officielles Keycloak Operator et CloudNativePG. Ne pas déployer les YAML comme une simple stack Docker Compose. Dans Portainer Kubernetes, utiliser la fonction manifests / custom resources ou un dépôt Git privé, après installation préalable des Operators et CRD.

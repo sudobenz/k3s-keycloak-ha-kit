@@ -1,0 +1,44 @@
+# Désactivation des composants inutiles pour Headlamp
+alertmanager:
+  enabled: false
+
+prometheus-node-exporter:
+  enabled: false
+
+prometheus-pushgateway:
+  enabled: false
+
+# Conservé pour les métriques Kubernetes
+kube-state-metrics:
+  enabled: true
+
+server:
+  replicaCount: 1
+
+  # Les graphiques Headlamp utilisent notamment des fenêtres de 1 minute
+  global:
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    evaluation_interval: 1m
+
+  retention: "7d"
+  retentionSize: "4GB"
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 768Mi
+
+  persistentVolume:
+    enabled: true
+    size: 5Gi
+
+  service:
+    enabled: true
+    type: ClusterIP
+    servicePort: 80
+    labels:
+      headlamp-prometheus: "true"

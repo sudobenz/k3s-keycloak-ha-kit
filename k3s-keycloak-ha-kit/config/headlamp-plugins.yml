@@ -1,0 +1,10 @@
+plugins:
+  - name: cnpg-headlamp-plugin
+    source: https://artifacthub.io/packages/headlamp/cnpg-headlamp-plugin/cnpg-headlamp-plugin
+    version: "0.1.6"
+  - name: cert-manager
+    source: https://artifacthub.io/packages/headlamp/headlamp-plugins/headlamp_cert-manager
+    version: "0.1.1"
+installOptions:
+  parallel: true
+  maxConcurrent: 2

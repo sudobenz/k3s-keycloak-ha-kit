@@ -1,0 +1,21 @@
+# Exemple à adapter ; le script 07-prepare-tls-secret.sh génère ce Certificate
+# automatiquement lorsque KEYCLOAK_TLS_MODE=cert-manager.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: keycloak-public-tls
+  namespace: keycloak
+spec:
+  secretName: keycloak-tls
+  dnsNames:
+    - keycloak.example.net
+  issuerRef:
+    name: letsencrypt-dns01
+    kind: ClusterIssuer
+    group: cert-manager.io
+  privateKey:
+    algorithm: RSA
+    size: 3072
+    rotationPolicy: Always
+  duration: 2160h
+  renewBefore: 360h

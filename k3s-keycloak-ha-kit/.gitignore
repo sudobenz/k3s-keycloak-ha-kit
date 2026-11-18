@@ -1,0 +1,30 @@
+/config.env
+# Secrets / identité
+secrets.env
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keytab
+*.kubeconfig
+kubeconfig
+.kube/
+.env
+
+# Données d'exploitation / sauvegardes / diagnostics
+backups/*
+!backups/.gitkeep
+output/*
+!output/.gitkeep
+*.dump
+*.sql
+*.log
+*.csv
+*.json
+.DS_Store
+# Données opérationnelles privées générées par le sous-système upgrade
+upgrade/backup-evidence.env
+upgrade/backups/*
+upgrade/reports/*
+upgrade/manifests/*

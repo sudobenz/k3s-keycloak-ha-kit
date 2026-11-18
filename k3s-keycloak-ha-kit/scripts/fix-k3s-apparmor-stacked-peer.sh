@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# Correct the containerd AppArmor profile for Ubuntu 26.04 stacked labels.
+# Qualification historique : K3s v1.36.5 / embedded containerd 2.3.4. Le kit cible K3s v1.36.6 ; vérifier le comportement réel avant usage.
+# Installs a persistent host profile, loads it now, and restores the Ubuntu
+# unprivileged-unconfined restriction to 1. Run locally on each K3s node.
+
+set -Eeuo pipefail
+
+PROFILE_NAME='cri-containerd.apparmor.d'
+PROFILE_FILE="/etc/apparmor.d/${PROFILE_NAME}"
+SYSCTL_FILE='/etc/sysctl.d/zzzzzzzzzz-k3s-containerd-apparmor.conf'
+BACKUP_DIR='/var/backups/k3s-apparmor'
+APPARMOR_UNIT='apparmor.service'
+
+log()  { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+die()  { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+
+[[ ${EUID} -eq 0 ]] || die 'Exécuter ce script en root (sudo bash ...).'
+command -v apparmor_parser >/dev/null 2>&1 || die 'apparmor_parser est absent.'
+command -v systemctl >/dev/null 2>&1 || die 'systemd/systemctl est absent.'
+[[ -r /etc/os-release ]] || die '/etc/os-release est introuvable.'
+# shellcheck disable=SC1091
+. /etc/os-release
+[[ ${ID:-} == ubuntu && ${VERSION_ID:-} == '26.04' ]] || \
+  die "Ce script cible Ubuntu 26.04 ; système détecté : ${PRETTY_NAME:-inconnu}."
+
+# Identify the active K3s systemd unit (server or agent).
+K3S_UNIT=''
+for unit in k3s.service k3s-agent.service; do
+  if systemctl is-active --quiet "$unit"; then
+    K3S_UNIT="$unit"
+    break
+  fi
+done
+[[ -n "$K3S_UNIT" ]] || die 'Ni k3s.service ni k3s-agent.service ne sont actifs.'
+
+K3S_PID="$(systemctl show "$K3S_UNIT" --property=MainPID --value)"
+[[ "$K3S_PID" =~ ^[1-9][0-9]*$ && -r "/proc/${K3S_PID}/attr/current" ]] || \
+  die "Impossible de lire le profil AppArmor du processus principal ${K3S_UNIT}."
+
+DAEMON_PROFILE="$(cat "/proc/${K3S_PID}/attr/current" 2>/dev/null || true)"
+DAEMON_PROFILE="${DAEMON_PROFILE%% *}"
+[[ -n "$DAEMON_PROFILE" ]] || DAEMON_PROFILE='unconfined'
+case "$DAEMON_PROFILE" in
+  *[!A-Za-z0-9_.:/-]*) die "Nom de profil AppArmor du service K3s inattendu : ${DAEMON_PROFILE}" ;;
+esac
+
+# Ensure AppArmor is available before loading the host profile.
+systemctl start "$APPARMOR_UNIT" || die "Impossible de démarrer ${APPARMOR_UNIT}."
+[[ -d /sys/kernel/security/apparmor ]] || die 'L’interface AppArmor du noyau est absente.'
+
+mkdir -p "$BACKUP_DIR"
+chmod 0700 "$BACKUP_DIR"
+
+# Back up any existing local profile before replacing it.
+if [[ -f "$PROFILE_FILE" ]]; then
+  BACKUP_FILE="${BACKUP_DIR}/${PROFILE_NAME}.$(date +%Y%m%d-%H%M%S).bak"
+  cp -a "$PROFILE_FILE" "$BACKUP_FILE"
+  log "Profil précédent sauvegardé dans ${BACKUP_FILE}"
+fi
+
+TMP_PROFILE="$(mktemp /tmp/${PROFILE_NAME}.XXXXXX)"
+trap 'rm -f "$TMP_PROFILE"' EXIT
+
+{
+  if [[ -e /etc/apparmor.d/abi/3.0 ]]; then
+    printf 'abi <abi/3.0>,\n\n'
+  fi
+
+  if [[ -e /etc/apparmor.d/tunables/global ]]; then
+    printf '#include <tunables/global>\n\n'
+  else
+    printf '@{PROC}=/proc/\n\n'
+  fi
+
+  cat <<'PROFILE_START'
+profile cri-containerd.apparmor.d flags=(attach_disconnected,mediate_deleted) {
+PROFILE_START
+
+  if [[ -e /etc/apparmor.d/abstractions/base ]]; then
+    printf '  #include <abstractions/base>\n'
+  fi
+
+  cat <<'PROFILE_BODY'
+
+  network,
+  capability,
+  file,
+  umount,
+
+  # Host (privileged) processes may send signals to container processes.
+  signal (receive) peer=unconfined,
+
+  # runc and crun may send signals to container processes.
+  signal (receive) peer=runc,
+  signal (receive) peer=crun,
+
+  # Manager may send signals to container processes.
+PROFILE_BODY
+
+  # Match the profile of the currently running K3s service, as containerd's
+  # upstream template does. Avoid duplicating the built-in peer entries.
+  case "$DAEMON_PROFILE" in
+    unconfined|runc|crun|"$PROFILE_NAME") ;;
+    *) printf '  signal (receive) peer=%s,\n' "$DAEMON_PROFILE" ;;
+  esac
+
+  cat <<'PROFILE_BODY'
+
+  # Container processes may signal one another under the plain profile.
+  signal (send,receive) peer=cri-containerd.apparmor.d,
+
+  # Ubuntu 26.04 may stack //&unconfined onto the container profile when
+  # kernel.apparmor_restrict_unprivileged_unconfined=1. Allow only this exact
+  # observed peer; do not use a broad stacked-peer wildcard here.
+  signal (send,receive) peer=cri-containerd.apparmor.d//&unconfined,
+
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9/],[^1-9/][^0-9/],[^1-9s/][^0-9y/][^0-9s/],[^1-9/][^0-9/][^0-9/][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+  deny mount,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+
+  # Preserve containerd's default same-container ptrace permissions, and
+  # allow the exact stacked peer generated by this Ubuntu restriction.
+  ptrace (trace,tracedby,read,readby) peer=cri-containerd.apparmor.d,
+  ptrace (trace,tracedby,read,readby) peer=cri-containerd.apparmor.d//&unconfined,
+}
+PROFILE_BODY
+} > "$TMP_PROFILE"
+
+chmod 0644 "$TMP_PROFILE"
+chown root:root "$TMP_PROFILE"
+
+log 'Validation syntaxique du profil AppArmor (sans chargement)...'
+apparmor_parser --skip-kernel-load --skip-cache "$TMP_PROFILE" || \
+  die 'Le profil AppArmor ne passe pas la validation syntaxique ; aucun changement de sysctl n’a été appliqué.'
+
+install -o root -g root -m 0644 "$TMP_PROFILE" "$PROFILE_FILE"
+log 'Chargement/remplacement du profil AppArmor...'
+if ! apparmor_parser --replace --skip-cache "$PROFILE_FILE"; then
+  warn 'Le chargement a échoué. Le profil local reste sauvegardé ; restauration du fichier précédent si disponible.'
+  if [[ -n "${BACKUP_FILE:-}" && -f "${BACKUP_FILE:-}" ]]; then
+    install -o root -g root -m 0644 "$BACKUP_FILE" "$PROFILE_FILE"
+    apparmor_parser --replace --skip-cache "$PROFILE_FILE" || true
+  else
+    rm -f "$PROFILE_FILE"
+  fi
+  die 'Échec du chargement AppArmor. Le sysctl n’a pas été modifié.'
+fi
+
+# Ensure AppArmor loads this profile before K3s starts after every reboot.
+DROPIN_DIR="/etc/systemd/system/${K3S_UNIT}.d"
+DROPIN_FILE="${DROPIN_DIR}/zzzz-apparmor-profile-ordering.conf"
+mkdir -p "$DROPIN_DIR"
+if [[ -f "$DROPIN_FILE" ]]; then
+  cp -a "$DROPIN_FILE" "${BACKUP_DIR}/${K3S_UNIT}.apparmor-profile-ordering.$(date +%Y%m%d-%H%M%S).bak"
+fi
+cat > "$DROPIN_FILE" <<'SYSTEMD'
+[Unit]
+Requires=apparmor.service
+After=apparmor.service
+SYSTEMD
+chmod 0644 "$DROPIN_FILE"
+systemctl daemon-reload
+
+# Persistently restore Ubuntu's hardening switch, but only after the corrected
+# AppArmor profile has been loaded successfully.
+cat > "$SYSCTL_FILE" <<'SYSCTL'
+# Managed by fix-k3s-apparmor-stacked-peer.sh
+# Keep Ubuntu's unprivileged-unconfined restriction enabled. The containerd
+# profile above explicitly permits the exact stacked peer used by K3s.
+kernel.apparmor_restrict_unprivileged_unconfined = 1
+SYSCTL
+chmod 0644 "$SYSCTL_FILE"
+sysctl -w kernel.apparmor_restrict_unprivileged_unconfined=1 >/dev/null
+
+# Verify the profile is loaded in enforce mode and the sysctl is enabled.
+if ! grep -Fxq "${PROFILE_NAME} (enforce)" /sys/kernel/security/apparmor/profiles; then
+  die "Le profil ${PROFILE_NAME} n’apparaît pas en mode enforce dans le noyau."
+fi
+CURRENT_SYSCTL="$(sysctl -n kernel.apparmor_restrict_unprivileged_unconfined)"
+[[ "$CURRENT_SYSCTL" == '1' ]] || die "Le sysctl vaut ${CURRENT_SYSCTL}, valeur attendue : 1."
+
+log "Correction installée sur $(hostname -s)."
+log "Service K3s détecté : ${K3S_UNIT} (PID ${K3S_PID}, profil manager ${DAEMON_PROFILE})."
+log "Profil chargé : ${PROFILE_NAME} (enforce)."
+log "Sysctl actuel et persistant : kernel.apparmor_restrict_unprivileged_unconfined=1."
+log "Ordre de démarrage garanti : ${APPARMOR_UNIT} avant ${K3S_UNIT}."
+log 'Aucun redémarrage de K3s n’a été effectué.'
+
+if command -v aa-exec >/dev/null 2>&1 && command -v setpriv >/dev/null 2>&1; then
+  cat <<'TEST'
+
+Test fonctionnel à exécuter maintenant :
+setpriv --reuid=65534 --regid=65534 --clear-groups \
+  aa-exec -p cri-containerd.apparmor.d -- sh -c '
+    sleep 3 & p=$!
+    kill -URG "$p" || exit 21
+    kill -TERM "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  '
+
+Si la commande termine avec le code 0, le signal entre processus confinés
+passe avec la restriction Ubuntu active.
+TEST
+else
+  warn 'aa-exec ou setpriv absent : test fonctionnel non exécuté. Le profil a été chargé et configuré pour le démarrage.'
+  warn 'Pour installer aa-exec : apt-get install apparmor-utils'
+fi

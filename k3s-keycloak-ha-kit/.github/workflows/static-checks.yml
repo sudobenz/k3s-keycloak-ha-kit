@@ -1,0 +1,40 @@
+name: Validation statique
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vérifier la syntaxe Bash
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            bash -n "$file"
+          done < <(find . -type f -name '*.sh' -not -path './.git/*' -print0)
+      - name: Compiler les scripts Python
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import py_compile
+          for path in Path('.').rglob('*.py'):
+              if '.git' not in path.parts:
+                  py_compile.compile(str(path), doraise=True)
+          PY
+      - name: Vérifier l’absence de clés privées et de configuration locale suivie
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RIlE --exclude-dir=.git --exclude=validate-kit.sh --exclude=static-checks.yml -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' .; then
+            echo 'Une clé privée semble présente dans le dépôt.' >&2
+            exit 1
+          fi
+          if git ls-files | grep -E '(^|/)(config\.env|secrets\.env|kubeconfig|.*\.keytab)$'; then
+            echo 'Un fichier de configuration locale ou secret est suivi par Git.' >&2
+            exit 1
+          fi
+
