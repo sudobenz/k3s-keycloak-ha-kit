@@ -8,6 +8,17 @@ Ce kit ne dépend d'aucun autre kit applicatif ni d'un cluster Kubernetes déjà
 Les paramètres IP/FQDN ci-dessous sont des valeurs de documentation réservées aux exemples. Ils doivent être remplacés par les valeurs de l’environnement cible. Aucun secret, kubeconfig, certificat privé, keytab ou mot de passe réel n’est livré dans l’archive.
 
 > **Mode de fonctionnement :** bootstrap initial sur trois machines vierges. Les scripts d'installation K3s, de partitionnement et de formatage Longhorn sont destructifs ou non réentrants. Ne pas les exécuter sur un cluster déjà en production.
+<!-- License badge: place this near the top of the README -->
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+
+<!-- License section: place this near the end of the README -->
+## License
+
+K3s Keycloak HA Kit is licensed under the [Apache License, Version 2.0](LICENSE).
+
+Copyright © 2026 sudobenz.
+
+Unless otherwise stated, this license applies to the original project files authored for this repository. Third-party components and assets remain subject to their respective licenses and notices.
 
 ## 1. Architecture cible
 
